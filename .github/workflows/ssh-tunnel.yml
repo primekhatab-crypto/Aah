@@ -3,64 +3,103 @@ name: SSH Tunnel Server
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */5 * * *'   # har 5 ghante auto restart
+    - cron: '0 */5 * * *'
 
 jobs:
   ssh-server:
     runs-on: ubuntu-latest
-    timeout-minutes: 350     # 5h50m (6h limit se pehle)
+    timeout-minutes: 360
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup SSH Server
+      - name: Generate Random Password
+        id: genpass
         run: |
-          # Root password set karo
+          # 16-character random password (letters + numbers)
+          PASSWORD=$(cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 16)
+          echo "password=$PASSWORD" >> $GITHUB_OUTPUT
+          echo "Generated password: $PASSWORD"
+
+      - name: Setup OpenSSH Server
+        env:
+          SSH_PASSWORD: ${{ steps.genpass.outputs.password }}
+        run: |
           sudo apt-get update -qq
           sudo apt-get install -y openssh-server
 
-          # SSH config
           sudo mkdir -p /run/sshd
           sudo sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config
           sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
-          # Root password
-          echo "root:YourStrongPass123" | sudo chpasswd
-
-          # Create a normal user (optional)
-          sudo useradd -m -s /bin/bash tunneluser || true
-          echo "tunneluser:TunnelPass123" | sudo chpasswd
-
-          # Restart SSH
+          echo "root:${SSH_PASSWORD}" | sudo chpasswd
           sudo systemctl restart ssh
 
-      - name: Install tunnel tools
+      - name: Setup Dropbear (port 443, 81)
+        continue-on-error: true
+        env:
+          SSH_PASSWORD: ${{ steps.genpass.outputs.password }}
         run: |
-          # Dropbear (port 443 ke liye) + stunnel (SSL)
-          sudo apt-get install -y dropbear stunnel4
+          sudo apt-get install -y dropbear
 
-          # Dropbear ko port 443 pe chalao
-          sudo sed -i 's/NO_START=1/NO_START=0/' /etc/default/dropbear
-          sudo sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=443/' /etc/default/dropbear
-          sudo systemctl restart dropbear
+          sudo sed -i 's/^NO_START=1/NO_START=0/' /etc/default/dropbear
+          sudo sed -i 's/^DROPBEAR_PORT=22/DROPBEAR_PORT=443/' /etc/default/dropbear
+
+          sudo pkill dropbear || true
+          sleep 1
+          sudo /usr/sbin/dropbear -p 443 -p 81 -E -s -g || true
 
       - name: Get Public IP
         id: ip
         run: |
           IP=$(curl -s ifconfig.me)
           echo "ip=$IP" >> $GITHUB_OUTPUT
-          echo "================================"
-          echo "SSH HOST: $IP"
-          echo "SSH PORT: 22 (OpenSSH)"
-          echo "SSH PORT: 443 (Dropbear)"
-          echo "USERNAME: root"
-          echo "PASSWORD: YourStrongPass123"
-          echo "================================"
 
-      - name: Keep alive
+      - name: Show Connection Info
+        env:
+          SSH_PASSWORD: ${{ steps.genpass.outputs.password }}
         run: |
-          echo "Server running. Will stay alive for ~5h50m"
-          sleep 21000
+          IP="${{ steps.ip.outputs.ip }}"
+          echo ""
+          echo "╔══════════════════════════════════════════════╗"
+          echo "║         SSH SERVER READY ✅                  ║"
+          echo "╠══════════════════════════════════════════════╣"
+          echo "║  HOST     : $IP"
+          echo "║  PORT     : 22 (OpenSSH) / 443 (Dropbear)"
+          echo "║  USERNAME : root"
+          echo "║  PASSWORD : $SSH_PASSWORD"
+          echo "║  EXPIRES  : 6 hours from now"
+          echo "╚══════════════════════════════════════════════╝"
+          echo ""
+          echo "SSH_PASSWORD=$SSH_PASSWORD" >> $GITHUB_ENV
+          echo "SSH_IP=$IP" >> $GITHUB_ENV
+
+      - name: Save Info to Artifact
+        run: |
+          mkdir -p /tmp/sshinfo
+          cat > /tmp/sshinfo/connection.txt <<EOF
+          HOST: ${{ steps.ip.outputs.ip }}
+          PORT: 22 (OpenSSH) / 443 (Dropbear)
+          USERNAME: root
+          PASSWORD: ${{ steps.genpass.outputs.password }}
+          GENERATED: $(date -u)
+          EXPIRES: 6 hours
+          EOF
+          cat /tmp/sshinfo/connection.txt
+
+      - name: Upload Connection Info
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-connection-info
+          path: /tmp/sshinfo/connection.txt
+          retention-days: 1
+
+      - name: Keep Alive (6 hours)
+        run: |
+          echo "Server will run for 6 hours..."
+          echo "Password: $SSH_PASSWORD"
+          echo "IP: $SSH_IP"
+          sleep 21600
