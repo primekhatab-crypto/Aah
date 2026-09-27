@@ -1,0 +1,66 @@
+name: SSH Tunnel Server
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */5 * * *'   # har 5 ghante auto restart
+
+jobs:
+  ssh-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350     # 5h50m (6h limit se pehle)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH Server
+        run: |
+          # Root password set karo
+          sudo apt-get update -qq
+          sudo apt-get install -y openssh-server
+
+          # SSH config
+          sudo mkdir -p /run/sshd
+          sudo sed -i 's/#Port 22/Port 22/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+
+          # Root password
+          echo "root:YourStrongPass123" | sudo chpasswd
+
+          # Create a normal user (optional)
+          sudo useradd -m -s /bin/bash tunneluser || true
+          echo "tunneluser:TunnelPass123" | sudo chpasswd
+
+          # Restart SSH
+          sudo systemctl restart ssh
+
+      - name: Install tunnel tools
+        run: |
+          # Dropbear (port 443 ke liye) + stunnel (SSL)
+          sudo apt-get install -y dropbear stunnel4
+
+          # Dropbear ko port 443 pe chalao
+          sudo sed -i 's/NO_START=1/NO_START=0/' /etc/default/dropbear
+          sudo sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=443/' /etc/default/dropbear
+          sudo systemctl restart dropbear
+
+      - name: Get Public IP
+        id: ip
+        run: |
+          IP=$(curl -s ifconfig.me)
+          echo "ip=$IP" >> $GITHUB_OUTPUT
+          echo "================================"
+          echo "SSH HOST: $IP"
+          echo "SSH PORT: 22 (OpenSSH)"
+          echo "SSH PORT: 443 (Dropbear)"
+          echo "USERNAME: root"
+          echo "PASSWORD: YourStrongPass123"
+          echo "================================"
+
+      - name: Keep alive
+        run: |
+          echo "Server running. Will stay alive for ~5h50m"
+          sleep 21000
